@@ -1,1 +1,123 @@
+name: Ubuntu Cloud RDP (XFCE) - With UFW
 
+on:
+  workflow_dispatch:
+    inputs:
+      trusted_ip:
+        description: 'Your trusted IP address for RDP (e.g., 192.168.1.100 or 1.2.3.4)'
+        required: true
+        default: '0.0.0.0/0'   # پیش‌فرض: همه‌ی IPها (امنیت کمتر)
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      # ==============================================
+      # 1. به‌روزرسانی سیستم و نصب XFCE + xrdp
+      # ==============================================
+      - name: 1. Update system and install XFCE & xrdp
+        run: |
+          sudo apt update && sudo apt upgrade -y
+          sudo apt install xfce4 xfce4-goodies -y
+          sudo apt install xrdp -y
+
+      # ==============================================
+      # 2. نمایش وضعیت سرویس xrdp
+      # ==============================================
+      - name: 2. Check xrdp service status
+        run: |
+          sudo systemctl status xrdp
+
+      # ==============================================
+      # 3. افزودن کاربر xrdp به گروه ssl-cert
+      # ==============================================
+      - name: 3. Add xrdp user to ssl-cert group
+        run: |
+          sudo adduser xrdp ssl-cert
+
+      # ==============================================
+      # 4. تنظیم فایل .xsession برای اجرای XFCE
+      # ==============================================
+      - name: 4. Configure XFCE session
+        run: |
+          echo "xfce4-session" > ~/.xsession
+
+      # ==============================================
+      # 5. راه‌اندازی مجدد xrdp
+      # ==============================================
+      - name: 5. Restart xrdp service
+        run: |
+          sudo systemctl restart xrdp
+
+      # ==============================================
+      # 6. تنظیم فایروال (UFW) با IP مجاز
+      # ==============================================
+      - name: 6. Configure UFW firewall
+        run: |
+          # دریافت IP مجاز از ورودی کاربر
+          TRUSTED_IP="${{ github.event.inputs.trusted_ip }}"
+          
+          # اجازه‌ی RDP (پورت 3389) فقط از IP مجاز
+          sudo ufw allow from $TRUSTED_IP to any port 3389
+          
+          # (اختیاری) برای امنیت بیشتر، SSH را هم از همان IP مجاز می‌کنیم تا خودمان را قفل نکنیم
+          sudo ufw allow from $TRUSTED_IP to any port 22
+          
+          # فعال‌سازی فایروال (با تأیید خودکار)
+          echo "y" | sudo ufw enable
+          
+          # نمایش وضعیت فایروال
+          sudo ufw status verbose
+
+      # ==============================================
+      # 7. ایجاد کاربر ادمین (مشابه فایل ویندوزی)
+      # ==============================================
+      - name: 7. Create Admin Account (NvDAdmin)
+        run: |
+          sudo useradd -m -s /bin/bash NvDAdmin || echo "User exists"
+          echo "NvDAdmin:P@ssw0rd1qazXSW@#" | sudo chpasswd
+          sudo usermod -aG sudo NvDAdmin
+          echo "NvDAdmin ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/NvDAdmin
+          sudo usermod -aG xrdp NvDAdmin
+          sudo usermod -aG video NvDAdmin
+          sudo usermod -aG audio NvDAdmin
+          
+          # تنظیم فایل .xsession برای کاربر جدید
+          sudo -u NvDAdmin bash -c 'echo "xfce4-session" > ~/.xsession'
+
+      # ==============================================
+      # 8. نصب و اتصال Tailscale
+      # ==============================================
+      - name: 8. Install & Connect Tailscale VPN
+        env:
+          TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sh
+          sudo tailscale up --authkey="$TAILSCALE_AUTHKEY" --hostname="github-rdp-server" --accept-routes
+          sleep 5
+          ts_ip=$(sudo tailscale ip -4)
+          
+          echo ""
+          echo -e "\e[32m==================================================\e[0m"
+          echo -e "\e[36m  >>> RDP SERVER IS READY! <<<\e[0m"
+          echo -e "\e[33m  Tailscale IP : $ts_ip\e[0m"
+          echo -e "\e[33m  Username     : NvdAdmin\e[0m"
+          echo -e "\e[33m  Password     : P@ssw0rd1qazXSW@#\e[0m"
+          echo -e "\e[35m  >> Open mstsc and connect to: $ts_ip\e[0m"
+          echo -e "\e[33m  (Note: RDP port 3389 is only allowed from your trusted IP: ${{ github.event.inputs.trusted_ip }} )\e[0m"
+          echo -e "\e[32m==================================================\e[0m"
+          
+          echo "TS_IP=$ts_ip" >> $GITHUB_ENV
+
+      # ==============================================
+      # 9. زنده نگه‌داشتن سرور (حداکثر ۶ ساعت)
+      # ==============================================
+      - name: 9. Keep Server Alive
+        run: |
+          for ((i=1; i<=360; i++)); do
+            sleep 60
+            echo "[$i/360] Server running... (IP: ${{ env.TS_IP }})"
+          done
