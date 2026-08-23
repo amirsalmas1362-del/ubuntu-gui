@@ -1,13 +1,7 @@
-name: Ubuntu RDP (XFCE) - Ultimate Debug
+name: Ubuntu Cloud SSH
 
 on:
   workflow_dispatch:
-    inputs:
-      trusted_ip:
-        description: 'Your trusted IP for RDP (e.g., 1.2.3.4)'
-        required: true
-        default: '0.0.0.0/0'
-        type: string
 
 jobs:
   build:
@@ -15,142 +9,55 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      # ================================================
-      # 1. به‌روزرسانی و نصب بسته‌ها
-      # ================================================
-      - name: 1. Update & Install
+      - name: 1. Update System & Allow SSH Firewall
         run: |
-          sudo apt update && sudo apt upgrade -y
-          sudo apt install -y xfce4 xfce4-goodies xrdp dbus-x11 sudo
+          sudo apt update -y
+          sudo apt install -y curl ufw
+          sudo ufw allow 22/tcp
+          echo "Firewall configured to allow SSH."
 
-      # ================================================
-      # 2. راه‌اندازی dbus
-      # ================================================
-      - name: 2. Start dbus
+      - name: 2. Create Admin Account
         run: |
-          sudo systemctl enable dbus
-          sudo systemctl start dbus
+          # ساخت کاربر جدید با همان نام و رمز قبلی
+          sudo useradd -m -s /bin/bash nvadmin || echo "User already exists"
+          echo "nvadmin:P@ssw0rd1qazXSW@#" | sudo chpasswd
+          sudo usermod -aG sudo nvadmin
+          # اجازه‌ی اجرای دستورات بدون پسورد (مشابه ادمین ویندوز)
+          echo "nvadmin ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/nvadmin
+          echo "Admin user 'nvadmin' created successfully."
 
-      # ================================================
-      # 3. ایجاد کاربر NvDAdmin (با حروف دقیق)
-      # ================================================
-      - name: 3. Create NvDAdmin user (exact case)
-        run: |
-          # حذف کامل کاربر قبلی (اگر وجود داشت)
-          sudo userdel -r NvDAdmin 2>/dev/null || true
-          sudo userdel -r NvdAdmin 2>/dev/null || true  # حذف نسخه‌ی با d کوچک (احتمال خطا)
-          
-          # ایجاد کاربر جدید با حروف دقیق
-          sudo useradd -m -s /bin/bash NvDAdmin
-          echo "NvDAdmin:P@ssw0rd1qazXSW@#" | sudo chpasswd
-          
-          # اضافه به گروه‌ها
-          sudo usermod -aG sudo,adm,xrdp,ssl-cert,video,audio NvDAdmin
-          
-          # تنظیم .xsession با startxfce4
-          sudo -u NvDAdmin bash -c 'echo "startxfce4" > ~/.xsession'
-          
-          # ایجاد دایرکتوری .config برای جلوگیری از خطاهای بعدی
-          sudo -u NvDAdmin mkdir -p ~/.config/xfce4-session
-          
-          echo "User NvDAdmin created successfully."
-          id NvDAdmin
-
-      # ================================================
-      # 4. تست احراز هویت (قبل از راه‌اندازی xrdp)
-      # ================================================
-      - name: 4. Test authentication locally
-        run: |
-          echo "=== Testing local login for NvDAdmin ==="
-          echo "P@ssw0rd1qazXSW@#" | sudo -S -u NvDAdmin whoami 2>&1 || echo "Authentication failed!"
-          echo "=== Test completed ==="
-
-      # ================================================
-      # 5. تنظیم xrdp و sesman
-      # ================================================
-      - name: 5. Configure xrdp
-        run: |
-          # ایجاد فایل .xsession برای root و runner
-          echo "startxfce4" | sudo tee /root/.xsession
-          echo "startxfce4" | tee ~/.xsession
-          
-          # تنظیم sesman.ini
-          sudo sed -i 's/^param=Xvnc/param=Xorg/' /etc/xrdp/sesman.ini
-          sudo sed -i 's/^param=Xorg/param=Xorg/' /etc/xrdp/sesman.ini
-          sudo sed -i 's/^allow_root_login=.*/allow_root_login=true/' /etc/xrdp/sesman.ini
-          sudo sed -i 's/^timeout=.*/timeout=300/' /etc/xrdp/sesman.ini
-          
-          # تنظیم xrdp.ini
-          sudo sed -i 's/^use_vsock=.*/use_vsock=false/' /etc/xrdp/xrdp.ini
-          sudo sed -i 's/^port=3389/port=3389/' /etc/xrdp/xrdp.ini
-
-      # ================================================
-      # 6. راه‌اندازی مجدد سرویس‌ها
-      # ================================================
-      - name: 6. Restart services
-        run: |
-          sudo systemctl restart dbus
-          sudo systemctl restart xrdp
-          sudo systemctl restart xrdp-sesman
-          sleep 3
-          sudo systemctl status xrdp --no-pager
-
-      # ================================================
-      # 7. فایروال (UFW)
-      # ================================================
-      - name: 7. Configure UFW
-        run: |
-          TRUSTED_IP="${{ github.event.inputs.trusted_ip }}"
-          sudo ufw allow from $TRUSTED_IP to any port 3389
-          sudo ufw allow from $TRUSTED_IP to any port 22
-          echo "y" | sudo ufw enable
-          sudo ufw status verbose
-
-      # ================================================
-      # 8. نصب Tailscale و اتصال
-      # ================================================
-      - name: 8. Install Tailscale
+      - name: 3. Install & Connect Tailscale VPN
         env:
           TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
         run: |
-          curl -fsSL https://tailscale.com/install.sh | sh
-          sudo tailscale up --authkey="$TAILSCALE_AUTHKEY" --hostname="github-rdp-server" --accept-routes
+          # نصب Tailscale روی اوبونتو (روش رسمی)
+          curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/noble.noarmor.gpg | sudo tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null
+          curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/noble.tailscale-keyring.list | sudo tee /etc/apt/sources.list.d/tailscale.list
+          sudo apt update -y
+          sudo apt install tailscale -y
+
+          # اتصال به شبکه‌ی Tailscale با کلید احراز هویت
+          sudo tailscale up --authkey="$TAILSCALE_AUTHKEY" --hostname="github-ubuntu-server" --accept-routes
+
           sleep 5
+
+          # دریافت آی‌پی اختصاصی Tailscale
           ts_ip=$(sudo tailscale ip -4)
-          
-          echo ""
-          echo -e "\e[32m==================================================\e[0m"
-          echo -e "\e[36m  >>> RDP SERVER IS READY! <<<\e[0m"
-          echo -e "\e[33m  Tailscale IP : $ts_ip\e[0m"
-          echo -e "\e[33m  Username     : NvDAdmin\e[0m"
-          echo -e "\e[33m  Password     : P@ssw0rd1qazXSW@#\e[0m"
-          echo -e "\e[35m  >> Open mstsc and connect to: $ts_ip\e[0m"
-          echo -e "\e[33m  >> CRITICAL: Username is CASE-SENSITIVE! Type 'NvDAdmin' exactly.\e[0m"
-          echo -e "\e[32m==================================================\e[0m"
-          
-          echo "TS_IP=$ts_ip" >> $GITHUB_ENV
 
-      # ================================================
-      # 9. نمایش کامل لاگ‌ها برای عیب‌یابی
-      # ================================================
-      - name: 9. Show full logs for debugging
-        run: |
-          echo "==================== /var/log/xrdp.log ===================="
-          sudo cat /var/log/xrdp.log | tail -30
           echo ""
-          echo "==================== /var/log/xrdp-sesman.log ===================="
-          sudo cat /var/log/xrdp-sesman.log | tail -30
-          echo ""
-          echo "==================== /var/log/auth.log (last 10 lines) ===================="
-          sudo tail -10 /var/log/auth.log
+          echo "=================================================="
+          echo "  >>> SSH SERVER IS READY! <<<" | tee -a
+          echo "  Tailscale IP : $ts_ip"
+          echo "  Username     : nvadmin"
+          echo "  Password     : P@ssw0rd1qazXSW@#"
+          echo "  >> Open your SSH client and connect to: $ts_ip"
+          echo "  >> Command: ssh nvadmin@$ts_ip"
+          echo "=================================================="
 
-      # ================================================
-      # 10. زنده نگه‌داشتن
-      # ================================================
-      - name: 10. Keep Alive
+      - name: 4. Keep Server Alive (6 Hours - GitHub Limit)
         run: |
-          echo "Server is up. Check the logs above if you face login issues."
+          # حلقه‌ای به تعداد دقیقه‌های مجاز (۳۶۰ دقیقه = ۶ ساعت، چون محدودیت گیت‌هاب همین است)
           for ((i=1; i<=360; i++)); do
             sleep 60
-            echo "[$i/360] Server running... (IP: ${{ env.TS_IP }})"
+            echo "[$i/360] Server running..."
           done
