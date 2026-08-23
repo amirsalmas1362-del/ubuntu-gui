@@ -1,12 +1,12 @@
-name: Ubuntu Cloud RDP (XFCE) - With UFW
+name: Ubuntu Cloud RDP (XFCE) - Fixed Login
 
 on:
   workflow_dispatch:
     inputs:
       trusted_ip:
-        description: 'Your trusted IP address for RDP (e.g., 192.168.1.100 or 1.2.3.4)'
+        description: 'Your trusted IP address for RDP (e.g., 192.168.1.100)'
         required: true
-        default: '0.0.0.0/0'   # پیش‌فرض: همه‌ی IPها (امنیت کمتر)
+        default: '0.0.0.0/0'
         type: string
 
 jobs:
@@ -16,82 +16,100 @@ jobs:
 
     steps:
       # ==============================================
-      # 1. به‌روزرسانی سیستم و نصب XFCE + xrdp
+      # 1. به‌روزرسانی و نصب بسته‌ها
       # ==============================================
       - name: 1. Update system and install XFCE & xrdp
         run: |
           sudo apt update && sudo apt upgrade -y
-          sudo apt install xfce4 xfce4-goodies -y
-          sudo apt install xrdp -y
+          sudo apt install -y xfce4 xfce4-goodies xrdp dbus-x11
 
       # ==============================================
-      # 2. نمایش وضعیت سرویس xrdp
+      # 2. راه‌اندازی سرویس dbus
       # ==============================================
-      - name: 2. Check xrdp service status
+      - name: 2. Start dbus service
         run: |
-          sudo systemctl status xrdp
+          sudo systemctl enable dbus
+          sudo systemctl start dbus
 
       # ==============================================
-      # 3. افزودن کاربر xrdp به گروه ssl-cert
+      # 3. ایجاد کاربر NvDAdmin (با اطمینان کامل)
       # ==============================================
-      - name: 3. Add xrdp user to ssl-cert group
+      - name: 3. Create Admin User (NvDAdmin)
         run: |
-          sudo adduser xrdp ssl-cert
-
-      # ==============================================
-      # 4. تنظیم فایل .xsession برای اجرای XFCE
-      # ==============================================
-      - name: 4. Configure XFCE session
-        run: |
-          echo "xfce4-session" > ~/.xsession
-
-      # ==============================================
-      # 5. راه‌اندازی مجدد xrdp
-      # ==============================================
-      - name: 5. Restart xrdp service
-        run: |
-          sudo systemctl restart xrdp
-
-      # ==============================================
-      # 6. تنظیم فایروال (UFW) با IP مجاز
-      # ==============================================
-      - name: 6. Configure UFW firewall
-        run: |
-          # دریافت IP مجاز از ورودی کاربر
-          TRUSTED_IP="${{ github.event.inputs.trusted_ip }}"
-          
-          # اجازه‌ی RDP (پورت 3389) فقط از IP مجاز
-          sudo ufw allow from $TRUSTED_IP to any port 3389
-          
-          # (اختیاری) برای امنیت بیشتر، SSH را هم از همان IP مجاز می‌کنیم تا خودمان را قفل نکنیم
-          sudo ufw allow from $TRUSTED_IP to any port 22
-          
-          # فعال‌سازی فایروال (با تأیید خودکار)
-          echo "y" | sudo ufw enable
-          
-          # نمایش وضعیت فایروال
-          sudo ufw status verbose
-
-      # ==============================================
-      # 7. ایجاد کاربر ادمین (مشابه فایل ویندوزی)
-      # ==============================================
-      - name: 7. Create Admin Account (NvDAdmin)
-        run: |
-          sudo useradd -m -s /bin/bash NvDAdmin || echo "User exists"
+          # اگر کاربر وجود دارد، حذفش می‌کنیم و دوباره می‌سازیم (برای اطمینان)
+          sudo userdel -r NvDAdmin 2>/dev/null || true
+          sudo useradd -m -s /bin/bash NvDAdmin
           echo "NvDAdmin:P@ssw0rd1qazXSW@#" | sudo chpasswd
+          
+          # اضافه کردن به گروه‌های لازم
           sudo usermod -aG sudo NvDAdmin
-          echo "NvDAdmin ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/NvDAdmin
           sudo usermod -aG xrdp NvDAdmin
+          sudo usermod -aG ssl-cert NvDAdmin
           sudo usermod -aG video NvDAdmin
           sudo usermod -aG audio NvDAdmin
           
-          # تنظیم فایل .xsession برای کاربر جدید
+          # تنظیم فایل .xsession
           sudo -u NvDAdmin bash -c 'echo "xfce4-session" > ~/.xsession'
+          
+          # نمایش اطلاعات کاربر برای دیباگ
+          echo "User NvDAdmin created successfully."
+          id NvDAdmin
 
       # ==============================================
-      # 8. نصب و اتصال Tailscale
+      # 4. افزودن کاربر xrdp به گروه ssl-cert
       # ==============================================
-      - name: 8. Install & Connect Tailscale VPN
+      - name: 4. Add xrdp user to ssl-cert group
+        run: |
+          sudo adduser xrdp ssl-cert || true
+
+      # ==============================================
+      # 5. تنظیم فایل .xsession برای کاربر root و runner
+      # ==============================================
+      - name: 5. Configure .xsession for root and runner
+        run: |
+          echo "xfce4-session" | sudo tee /root/.xsession
+          echo "xfce4-session" | tee ~/.xsession
+
+      # ==============================================
+      # 6. پیکربندی xrdp (رفع مشکلات احراز هویت)
+      # ==============================================
+      - name: 6. Configure xrdp for proper authentication
+        run: |
+          # اطمینان از اینکه sesman از Xorg استفاده کند و تنظیمات درست باشد
+          sudo sed -i 's/^param=Xorg/param=Xorg/' /etc/xrdp/sesman.ini
+          sudo sed -i 's/^param=Xvnc/param=Xorg/' /etc/xrdp/sesman.ini
+          sudo sed -i 's/^allow_root_login=.*/allow_root_login=true/' /etc/xrdp/sesman.ini
+          
+          # تنظیم timeout برای جلوگیری از قطع زودهنگام
+          sudo sed -i 's/^timeout=.*/timeout=300/' /etc/xrdp/sesman.ini
+          
+          # غیرفعال کردن vsock (مشکل‌ساز در برخی محیط‌ها)
+          sudo sed -i 's/^.*use_vsock=.*/use_vsock=false/' /etc/xrdp/xrdp.ini
+
+      # ==============================================
+      # 7. راه‌اندازی مجدد xrdp و sesman
+      # ==============================================
+      - name: 7. Restart xrdp services
+        run: |
+          sudo systemctl restart xrdp
+          sudo systemctl restart xrdp-sesman
+          sudo systemctl status xrdp --no-pager
+
+      # ==============================================
+      # 8. تنظیم فایروال (UFW)
+      # ==============================================
+      - name: 8. Configure UFW firewall
+        run: |
+          TRUSTED_IP="${{ github.event.inputs.trusted_ip }}"
+          sudo ufw allow from $TRUSTED_IP to any port 3389
+          sudo ufw allow from $TRUSTED_IP to any port 22
+          echo "y" | sudo ufw enable
+          sudo ufw status verbose
+
+      # ==============================================
+      # 9. نصب و اتصال Tailscale
+      # ==============================================
+      - name: 9. Install & Connect Tailscale
         env:
           TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
         run: |
@@ -104,18 +122,28 @@ jobs:
           echo -e "\e[32m==================================================\e[0m"
           echo -e "\e[36m  >>> RDP SERVER IS READY! <<<\e[0m"
           echo -e "\e[33m  Tailscale IP : $ts_ip\e[0m"
-          echo -e "\e[33m  Username     : NvdAdmin\e[0m"
+          echo -e "\e[33m  Username     : NvDAdmin\e[0m"
           echo -e "\e[33m  Password     : P@ssw0rd1qazXSW@#\e[0m"
           echo -e "\e[35m  >> Open mstsc and connect to: $ts_ip\e[0m"
-          echo -e "\e[33m  (Note: RDP port 3389 is only allowed from your trusted IP: ${{ github.event.inputs.trusted_ip }} )\e[0m"
+          echo -e "\e[33m  (RDP port 3389 is only allowed from your trusted IP: ${{ github.event.inputs.trusted_ip }} )\e[0m"
           echo -e "\e[32m==================================================\e[0m"
           
           echo "TS_IP=$ts_ip" >> $GITHUB_ENV
 
       # ==============================================
-      # 9. زنده نگه‌داشتن سرور (حداکثر ۶ ساعت)
+      # 10. دیباگ: نمایش لاگ‌های xrdp در صورت بروز خطا
       # ==============================================
-      - name: 9. Keep Server Alive
+      - name: 10. Debug - Show xrdp logs
+        run: |
+          echo "=== Last 20 lines of /var/log/xrdp.log ==="
+          sudo tail -20 /var/log/xrdp.log
+          echo "=== Last 20 lines of /var/log/xrdp-sesman.log ==="
+          sudo tail -20 /var/log/xrdp-sesman.log
+
+      # ==============================================
+      # 11. زنده نگه‌داشتن سرور
+      # ==============================================
+      - name: 11. Keep Server Alive
         run: |
           for ((i=1; i<=360; i++)); do
             sleep 60
