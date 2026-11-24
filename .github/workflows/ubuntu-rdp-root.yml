@@ -1,15 +1,5 @@
 name: Linux Desktop 6h (Tailscale + xrdp)
 
-# ---------------------------------------------------------------------------
-#  دسکتاپ لینوکس (XFCE) برای ۶ ساعت — تک جاب
-#  نسخهٔ با ورود root در صفحهٔ لاگین xrdp.
-#
-#  Secretهای لازم:
-#    - RDP_PASSWORD    (کاربر rdpuser، حداقل ۱۲ کاراکتر)
-#    - ROOT_PASSWORD   (کاربر root، حداقل ۱۲ کاراکتر — ترجیحاً ۲۴+)
-#    - TAILSCALE_AUTHKEY
-# ---------------------------------------------------------------------------
-
 on:
   workflow_dispatch:
     inputs:
@@ -47,7 +37,6 @@ jobs:
             echo "::error::رمز RDP باید حداقل ۱۲ کاراکتر باشد."
             exit 1
           fi
-          # NEW: اعتبارسنجی رمز root
           if [ -z "${ROOT_PASSWORD:-}" ]; then
             echo "::error::Secret ROOT_PASSWORD تعریف نشده است."
             exit 1
@@ -70,42 +59,43 @@ jobs:
           echo "${RDP_USER} ALL=(ALL) NOPASSWD:ALL" | sudo tee "/etc/sudoers.d/90-${RDP_USER}" >/dev/null
           sudo chmod 440 "/etc/sudoers.d/90-${RDP_USER}"
 
-          # NEW: رمز root و فعال‌سازی ورود root در xrdp
+          # --- رمز root
           sudo chpasswd <<< "root:${ROOT_PASSWORD}"
 
+          # --- بسته‌ها (اول نصب، بعد تنظیم sesman.ini)
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            xrdp xorgxrdp xfce4 xfce4-terminal dbus dbus-x11 x11-xserver-utils x11-utils
+
+          # NEW: بررسی وجود sesman.ini بعد از نصب
           SES=/etc/xrdp/sesman.ini
           if [ ! -f "$SES" ]; then
-            echo "::error::$SES پیدا نشد — نصب xrdp ناقص است."
+            echo "::error::$SES بعد از نصب xrdp پیدا نشد — نصب ناقص است."
+            sudo dpkg -L xrdp | grep -E 'sesman\.ini|/etc/xrdp/' || true
             exit 1
           fi
-          # اگر خط وجود دارد مقدارش را true کن، وگرنه زیر [Security] اضافه کن
+
+          # NEW: تنظیم AllowRootLogin بعد از نصب xrdp
           sudo sed -i -E 's/^[#[:space:]]*AllowRootLogin=.*/AllowRootLogin=true/' "$SES"
           if ! grep -q '^AllowRootLogin=' "$SES"; then
             sudo sed -i '/^\[Security\]/a AllowRootLogin=true' "$SES"
           fi
-          # اگر لیست محدودیت کاربری ست شده، خالی کن تا root و rdpuser مجاز باشند
           sudo sed -i -E 's/^[#[:space:]]*TerminalServerUsers=.*/TerminalServerUsers=/' "$SES"
           sudo sed -i -E 's/^[#[:space:]]*TerminalServerAdmins=.*/TerminalServerAdmins=/' "$SES"
           echo "--- تنظیمات امنیتی sesman.ini ---"
           sudo grep -E '^(AllowRootLogin|TerminalServerUsers|TerminalServerAdmins)=' "$SES" || true
 
-          # --- بسته‌ها
-          sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-            xrdp xorgxrdp xfce4 xfce4-terminal dbus dbus-x11 x11-xserver-utils x11-utils
-
           # --- نشست XFCE برای rdpuser
           echo "xfce4-session" | sudo tee "/home/${RDP_USER}/.xsession" >/dev/null
           sudo chown "${RDP_USER}:${RDP_USER}" "/home/${RDP_USER}/.xsession"
 
-          # NEW: نشست XFCE برای root (startwm.sh مشترک است ولی .xsession را هم می‌گذاریم)
+          # --- نشست XFCE برای root
           echo "xfce4-session" | sudo tee /root/.xsession >/dev/null
           sudo chmod 644 /root/.xsession
 
-          # --- startwm.sh جایگزین (رفع صفحهٔ سیاه + کار برای root و rdpuser)
+          # --- startwm.sh جایگزین
           sudo tee /etc/xrdp/startwm.sh >/dev/null <<'STARTWM'
           #!/bin/sh
-          # --- xrdp: راه‌اندازی نشست XFCE (برای هر کاربر از جمله root)
           if [ -r /etc/profile ]; then . /etc/profile; fi
           if [ -r "$HOME/.profile" ]; then . "$HOME/.profile"; fi
 
@@ -208,7 +198,6 @@ jobs:
             sleep 3
           }
 
-          # ── تست rdpuser
           test_auth "${RDP_USER}" "${RDP_PASSWORD}"
           if test_session "${RDP_USER}" "${RDP_PASSWORD}"; then
             echo '✔ rdpuser: نشست XFCE بالا آمد'
@@ -218,7 +207,6 @@ jobs:
           fi
           cleanup_sessions
 
-          # ── تست root
           test_auth root "${ROOT_PASSWORD}"
           if test_session root "${ROOT_PASSWORD}"; then
             echo '✔ root: نشست XFCE بالا آمد'
@@ -303,7 +291,6 @@ jobs:
           if [ "$M" -gt 350 ]; then M=350; fi
           if [ "$M" -lt 1 ]; then M=1; fi
 
-          # NEW: پاکسازی نشست‌های باقی‌مانده برای هر دو کاربر
           for U in "${RDP_USER}" root; do
             for p in xfce4-session xfwm4 xfsettingsd xfce4-panel xfdesktop xrdp-chansrv; do
               sudo pkill -u "$U" -x "$p" >/dev/null 2>&1 || true
